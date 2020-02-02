@@ -1,5 +1,4 @@
-use std::marker::PhantomData;
-use std::task::{RawWaker, RawWakerVTable, Waker as StdWaker};
+use std::task;
 use stowaway::{self, Stowaway};
 
 pub trait RefWaker: Clone {
@@ -10,65 +9,78 @@ pub trait Waker: RefWaker + Sized {
     fn wake(self) {
         self.wake_by_ref();
     }
+}
 
-    fn get_vtable() -> &'static RawWakerVTable {
-        static VTABLE: RawWakerVTable = RawWakerVTable::new(
-            // clone
-            vtable_clone_function::<Self>,
-            vtable_wake_function::<Self>,
-            vtable_wake_by_ref_function::<Self>,
-            vtable_drop_function::<Self>,
-        );
+impl<T: RefWaker> RefWaker for &'static T {
+    fn wake_by_ref(&self) {
+        T::wake_by_ref(*self)
     }
 }
 
-unsafe fn vtable_clone_function<T>(raw: *const ()) -> RawWaker {
-    let raw = raw as *mut ();
-    let waker: &T = unsafe { stowaway::ref_from_stowed(&raw) };
-    let cloned: T = waker.clone();
-    let stowed: Stowaway<T> = Stowaway::new(cloned);
-    let new_raw: *mut () = Stowaway::into_raw(stowed);
-    RawWaker::new(new_raw, get_vtable::<T>())
+impl<T: RefWaker> Waker for &'static T {
+    fn wake(self) {
+        T::wake_by_ref(self)
+    }
 }
 
-unsafe fn vtable_wake_function<T>(raw: *const ()) {
-    let raw = raw as *mut ();
-    let waker: Stowaway<T> = unsafe { Stowaway::from_raw(raw) };
-    waker.wake();
+pub trait IntoWaker: Waker {
+    fn into_waker(self) -> task::Waker;
+}
+#[derive(Debug, Clone, Default)]
+struct ThreadParkWaker;
+
+impl RefWaker for ThreadParkWaker {
+    fn wake_by_ref(&self) {
+        std::thread::current().unpark()
+    }
 }
 
-unsafe fn vtable_wake_by_ref_function<T>(raw: *const ()) {
-    let raw = raw as *mut ();
-    let waker: &T = unsafe { stowaway::ref_from_stowed(&raw) };
-    waker.wake_by_ref();
+impl Waker for ThreadParkWaker {
+    fn wake(self) {
+        std::thread::current().unpark()
+    }
 }
 
-unsafe fn vtable_drop_function<T>(raw: *const ()) {
-    let raw = raw as *mut ();
-    let _waker: Stowaway<T> = unsafe { Stowaway::from_raw(raw) };
+macro_rules! cook_waker {
+    ($Waker:ty) => {
+        impl $crate::IntoWaker for $Waker {
+            #[inline]
+            #[must_use]
+            fn into_waker(self) -> std::task::Waker {
+                let stowed = stowaway::stow(self);
+
+                static VTABLE: std::task::RawWakerVTable = std::task::RawWakerVTable::new(
+                    // clone
+                    |raw| {
+                        let raw = raw as *mut ();
+                        let waker: &$Waker = unsafe { stowaway::ref_from_stowed(&raw) };
+                        let cloned: $Waker = std::clone::Clone::clone(waker);
+                        let stowed_clone = stowaway::stow(cloned);
+                        std::task::RawWaker::new(stowed_clone, &VTABLE)
+                    },
+                    // wake by value
+                    |raw| {
+                        let waker: $Waker = unsafe { stowaway::unstow(raw as *mut ()) };
+                        $crate::Waker::wake(waker);
+                    },
+                    // wake by ref
+                    |raw| {
+                        let raw = raw as *mut ();
+                        let waker: &$Waker = unsafe { stowaway::ref_from_stowed(&raw) };
+                        $crate::RefWaker::wake_by_ref(waker)
+                    },
+                    // Drop
+                    |raw| {
+                        let _waker: Stowaway<$Waker> =
+                            unsafe { Stowaway::from_raw(raw as *mut ()) };
+                    },
+                );
+
+                let raw_waker = std::task::RawWaker::new(stowed, &VTABLE);
+                unsafe { std::task::Waker::from_raw(raw_waker) }
+            }
+        }
+    };
 }
 
-#[inline]
-const fn get_vtable<T: Waker>() -> &'static RawWakerVTable {
-    let x: WakerVtable<T> = WakerVtable;
-    static VTABLE: RawWakerVTable = RawWakerVTable::new(
-        vtable_clone_function::<T>,
-        vtable_wake_function::<T>,
-        vtable_wake_by_ref_function::<T>,
-        vtable_drop_function::<T>,
-    );
-
-    &VTABLE
-}
-
-#[inline]
-fn make_raw_waker<T: Waker>(waker: T) -> RawWaker {
-    let stowed: Stowaway<T> = Stowaway::new(waker);
-    let new_raw: *mut () = Stowaway::into_raw(stowed);
-    RawWaker::new(new_raw, get_vtable::<T>())
-}
-
-pub fn make_std_waker<T: Waker>(waker: T) -> StdWaker {
-    let raw_waker = make_raw_waker(waker);
-    unsafe { Waker::from_raw(raw_waker) }
-}
+cook_waker! {ThreadParkWaker}
