@@ -1,3 +1,4 @@
+#[allow(unused_imports)]
 #[macro_use]
 extern crate cooked_waker_derive;
 
