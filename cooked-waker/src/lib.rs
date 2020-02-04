@@ -81,6 +81,7 @@ pub trait IntoWaker: Wake + Clone + Send + Sync {
     /// Convert this object into a `Waker`. Note that this must be safe:
     /// the `Waker` must take ownership of `Self` and correctly manage its
     /// operation and lifetime.
+    #[must_use]
     fn into_waker(self) -> Waker;
 }
 
@@ -115,12 +116,7 @@ impl<T: WakeRef + ?Sized> WakeRef for arc::Arc<T> {
     }
 }
 
-impl<T: WakeRef + ?Sized> Wake for arc::Arc<T> {
-    #[inline]
-    fn wake(self) {
-        T::wake_by_ref(self.as_ref())
-    }
-}
+impl<T: WakeRef + ?Sized> Wake for arc::Arc<T> {}
 
 impl<T: WakeRef + ?Sized> WakeRef for arc::Weak<T> {
     #[inline]
@@ -157,7 +153,7 @@ impl<T: WakeRef + ?Sized> Wake for rc::Weak<T> {}
 impl<T: WakeRef> WakeRef for Option<T> {
     #[inline]
     fn wake_by_ref(&self) {
-        if let Some(waker) = self {
+        if let Some(ref waker) = *self {
             waker.wake_by_ref()
         }
     }
