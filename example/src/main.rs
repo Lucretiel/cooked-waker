@@ -1,34 +1,46 @@
-use std::thread::Thread;
-
-use cooked_waker::{IntoWaker, RefWake, Wake};
-use std::thread;
+use cooked_waker::{IntoWaker, Wake, WakeRef};
+use std::{sync::Arc, task::Waker};
 
 #[derive(Debug, Clone, IntoWaker)]
-struct ThreadWaker {
-    thread: Thread,
+struct CustomWaker {
+    id: i128,
 }
 
-impl ThreadWaker {
-    fn from_current() -> Self {
-        Self {
-            thread: thread::current(),
-        }
+impl CustomWaker {
+    fn new(id: i128) -> Self {
+        Self { id }
     }
 }
 
-impl RefWake for ThreadWaker {
+impl WakeRef for CustomWaker {
     fn wake_by_ref(&self) {
-        self.thread.unpark();
+        println!("wake by ref: {}", self.id);
     }
 }
 
-impl Wake for ThreadWaker {}
+impl Wake for CustomWaker {
+    fn wake(self) {
+        println!("wake by value: {}", self.id);
+    }
+}
+
+impl Drop for CustomWaker {
+    fn drop(&mut self) {
+        println!("dropping waker: {}", self.id);
+    }
+}
+
+#[derive(Debug, Clone, WakeRef, Wake, IntoWaker)]
+struct SharedWaker {
+    waker: Arc<CustomWaker>,
+}
 
 fn main() {
     println!("Hello, world!");
+    let waker = CustomWaker::new(11);
+    let waker: Waker = waker.into_waker();
 
-    let waker = ThreadWaker::from_current();
-    let waker = waker.into_waker();
-
-    eprintln!("{:?}", &waker);
+    println!("Waker: {:?}", waker);
+    waker.wake_by_ref();
+    waker.wake();
 }

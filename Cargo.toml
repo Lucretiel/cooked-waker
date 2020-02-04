@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "cooked_waker",
-    "cooked_waker_derive",
+    "cooked-waker",
+    "cooked-waker-derive",
     "example",
 ]
