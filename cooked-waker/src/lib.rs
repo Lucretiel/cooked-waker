@@ -17,6 +17,117 @@
 //! trait generically. We therefore instead provide a derive that can be
 //! applied to any *concrete* type; see the [`IntoWaker`] documentation for
 //! more information
+//!
+//! # Basic example
+//!
+//! ```
+//! use cooked_waker::{Wake, WakeRef, IntoWaker};
+//! use std::sync::atomic::{AtomicUsize, Ordering};
+//! use std::task::Waker;
+//!
+//! static wake_ref_count: AtomicUsize = AtomicUsize::new(0);
+//! static wake_value_count: AtomicUsize = AtomicUsize::new(0);
+//! static drop_count: AtomicUsize = AtomicUsize::new(0);
+//!
+//! // A simple Waker struct that atomically increments the relevant static
+//! // counters
+//! #[derive(Debug, Clone)]
+//! struct StaticWaker;
+//!
+//! impl WakeRef for StaticWaker {
+//!     fn wake_by_ref(&self) {
+//!         wake_ref_count.fetch_add(1, Ordering::SeqCst);
+//!     }
+//! }
+//!
+//! impl Wake for StaticWaker {
+//!     fn wake(self) {
+//!         wake_value_count.fetch_add(1, Ordering::SeqCst);
+//!     }
+//! }
+//!
+//! impl Drop for StaticWaker {
+//!     fn drop(&mut self) {
+//!         drop_count.fetch_add(1, Ordering::SeqCst);
+//!     }
+//! }
+//!
+//! let waker = StaticWaker;
+//!
+//! {
+//!     let waker1: Waker = waker.into_waker();
+//!
+//!     waker1.wake_by_ref();
+//!     assert_eq!(wake_ref_count.load(Ordering::SeqCst), 1);
+//!
+//!     let waker2: Waker = waker1.clone();
+//!     waker2.wake_by_ref();
+//!     assert_eq!(wake_ref_count.load(Ordering::SeqCst), 2);
+//!
+//!     waker1.wake();
+//!     assert_eq!(wake_value_count.load(Ordering::SeqCst), 1);
+//!     assert_eq!(drop_count.load(Ordering::SeqCst), 1);
+//! }
+//! assert_eq!(drop_count.load(Ordering::SeqCst), 2);
+//! ```
+//!
+//! # Arc example
+//!
+//! ```
+//! use cooked_waker::{Wake, WakeRef, IntoWaker};
+//! use std::sync::atomic::{AtomicUsize, Ordering};
+//! use std::task::Waker;
+//!
+//! // A simple struct that counts the number of times it is awoken. Can't
+//! // be awoken by value; you must instead wrap it in an Arc (see
+//! // CounterHandle)
+//! #[derive(Debug, Default)]
+//! struct Counter {
+//!     // We use atomic usize because we need Send + Sync and also interior
+//!     // mutability
+//!     count: AtomicUsize,
+//! }
+//!
+//! impl Counter {
+//!     fn get(&self) -> usize {
+//!         self.count.load(Ordering::SeqCst)
+//!     }
+//! }
+//!
+//! impl WakeRef for Counter {
+//!     fn wake_by_ref(&self) {
+//!         let _prev = self.count.fetch_add(1, Ordering::SeqCst);
+//!     }
+//! }
+//!
+//! // A shared handle to a Counter.
+//! //
+//! // We can derive Wake and WakeRef because the inner field implements
+//! // them, and we can derive IntoWaker because this is a concrete type
+//! // with Wake + Clone + Send + Sync. Note that *any* concrete type can have
+//! // IntoWaker implemented for it; it doesn't have to be "pointer-sized"
+//! #[derive(Debug, Clone, Default, WakeRef, Wake, IntoWaker)]
+//! struct CounterHandle {
+//!     counter: Arc<Counter>,
+//! }
+//!
+//! let counter = CounterHandle::default();
+//!
+//! // Create an std::task::Waker
+//! let waker: Waker = counter.clone().into_waker();
+//!
+//! waker.wake_by_ref();
+//! waker.wake_by_ref();
+//!
+//! let waker2 = waker.clone();
+//! waker2.wake_by_ref();
+//!
+//! // This calls Counter::wake_by_ref because the Arc doesn't have exclusive
+//! // ownership of the underlying Counter
+//! waker2.wake();
+//!
+//! assert_eq!(cointer.get(), 4);
+//! ```
 
 extern crate alloc;
 
@@ -73,11 +184,13 @@ pub trait Wake: WakeRef + Sized {
 /// with the concrete type `Self`, and find a way to convert `Self` to and
 /// from a `RawWaker`.
 ///
-/// This trait can be derived for any *concrete* `Wake + Clone` type. This
-/// derive sets up a `RawWakerVTable` for the type, and arranges a conversion
-/// into a `Waker` through the `stowaway` crate, which allows packing the bytes
-/// of any sized type into a pointer (boxing it if it's too large to fit)
-pub trait IntoWaker: Wake + Clone + Send + Sync {
+/// This trait can be derived for any *concrete*` type. This derive sets up a
+/// `RawWakerVTable` for the type, and arranges a conversion into a `Waker`
+/// through the `stowaway` crate, which allows packing the bytes of any sized
+/// type into a pointer (boxing it if it's too large to fit). This Waker will
+/// then call the relevant `Wake`, `RefWake`, or `Clone` methods throughout its
+/// lifecycle.
+pub trait IntoWaker: Wake + Clone + Send + Sync + 'static {
     /// Convert this object into a `Waker`. Note that this must be safe:
     /// the `Waker` must take ownership of `Self` and correctly manage its
     /// operation and lifetime.
@@ -86,14 +199,14 @@ pub trait IntoWaker: Wake + Clone + Send + Sync {
 }
 
 // Waker implementations for std types.
-impl<T: WakeRef> WakeRef for &'static T {
+impl<T: WakeRef> WakeRef for &T {
     #[inline]
     fn wake_by_ref(&self) {
         T::wake_by_ref(*self)
     }
 }
 
-impl<T: WakeRef> Wake for &'static T {}
+impl<T: WakeRef> Wake for &T {}
 
 impl<T: WakeRef + ?Sized> WakeRef for Box<T> {
     #[inline]
