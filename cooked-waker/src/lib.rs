@@ -30,8 +30,9 @@
 //! static drop_count: AtomicUsize = AtomicUsize::new(0);
 //!
 //! // A simple Waker struct that atomically increments the relevant static
-//! // counters
-//! #[derive(Debug, Clone)]
+//! // counters. We can derive IntoWaker on it because it implenments Wake
+//! // and Clone.
+//! #[derive(Debug, Clone, IntoWaker)]
 //! struct StaticWaker;
 //!
 //! impl WakeRef for StaticWaker {
@@ -52,8 +53,9 @@
 //!     }
 //! }
 //!
-//! let waker = StaticWaker;
+//! assert_eq!(drop_count.load(Ordering::SeqCst), 0);
 //!
+//! let waker = StaticWaker;
 //! {
 //!     let waker1: Waker = waker.into_waker();
 //!
@@ -76,6 +78,7 @@
 //! ```
 //! use cooked_waker::{Wake, WakeRef, IntoWaker};
 //! use std::sync::atomic::{AtomicUsize, Ordering};
+//! use std::sync::Arc;
 //! use std::task::Waker;
 //!
 //! // A simple struct that counts the number of times it is awoken. Can't
@@ -111,6 +114,12 @@
 //!     counter: Arc<Counter>,
 //! }
 //!
+//! impl CounterHandle {
+//!     fn get(&self) -> usize {
+//!         self.counter.get()
+//!     }
+//! }
+//!
 //! let counter = CounterHandle::default();
 //!
 //! // Create an std::task::Waker
@@ -126,7 +135,7 @@
 //! // ownership of the underlying Counter
 //! waker2.wake();
 //!
-//! assert_eq!(cointer.get(), 4);
+//! assert_eq!(counter.get(), 4);
 //! ```
 
 extern crate alloc;
@@ -179,21 +188,19 @@ pub trait Wake: WakeRef + Sized {
 /// Note that, due to limitations in how generics interact with statics, it
 /// is not currently possible to implement this trait generically (otherwise
 /// we'd simply have a global implementation for all `T: Waker + Clone`.)
-/// Therefore, any implementation must create a
+/// Therefore, any implementation must manually create a
 /// [`RawWakerVTable`][core::task::RawWakerVTable] associated
 /// with the concrete type `Self`, and find a way to convert `Self` to and
 /// from a `RawWaker`.
 ///
-/// This trait can be derived for any *concrete*` type. This derive sets up a
+/// This trait can be derived for any *concrete* type. This derive sets up a
 /// `RawWakerVTable` for the type, and arranges a conversion into a `Waker`
 /// through the `stowaway` crate, which allows packing the bytes of any sized
 /// type into a pointer (boxing it if it's too large to fit). This Waker will
 /// then call the relevant `Wake`, `RefWake`, or `Clone` methods throughout its
 /// lifecycle.
 pub trait IntoWaker: Wake + Clone + Send + Sync + 'static {
-    /// Convert this object into a `Waker`. Note that this must be safe:
-    /// the `Waker` must take ownership of `Self` and correctly manage its
-    /// operation and lifetime.
+    /// Convert this object into a `Waker`.
     #[must_use]
     fn into_waker(self) -> Waker;
 }
@@ -278,5 +285,26 @@ impl<T: Wake> Wake for Option<T> {
         if let Some(waker) = self {
             waker.wake()
         }
+    }
+}
+
+impl WakeRef for Waker {
+    #[inline]
+    fn wake_by_ref(&self) {
+        Waker::wake_by_ref(self)
+    }
+}
+
+impl Wake for Waker {
+    #[inline]
+    fn wake(self) {
+        Waker::wake(self)
+    }
+}
+
+impl IntoWaker for Waker {
+    #[inline]
+    fn into_waker(self) -> Waker {
+        self
     }
 }
