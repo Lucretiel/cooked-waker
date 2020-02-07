@@ -1,8 +1,9 @@
 #![no_std]
 
-//! cooked_waker provides traits for working with [`std::task::Waker`][Waker]
-//! and, more importantly, a set of derives for safely converting normal,
-//! safe rust types into `Waker` instances.
+//! cooked_waker provides safe traits for working with
+//! [`std::task::Waker`][Waker] and, more importantly, a set of derives for
+//! safely converting normal, safe rust types into `Waker` instances. It cooks
+//! `RawWaker` and `RawWakerVTable`, making them safe for consumption.
 //!
 //! It provides the [`Wake`] and [`WakeRef`] traits, which correspond to the
 //! [`wake`][Waker::wake] and [`wake_by_ref`][Waker::wake_by_ref] methods
@@ -16,7 +17,7 @@
 //! how generics interact with static, it's not possible to implement this
 //! trait generically. We therefore instead provide a derive that can be
 //! applied to any *concrete* type; see the [`IntoWaker`] documentation for
-//! more information
+//! more information.
 //!
 //! # Basic example
 //!
@@ -82,8 +83,8 @@
 //! use std::task::Waker;
 //!
 //! // A simple struct that counts the number of times it is awoken. Can't
-//! // be awoken by value; you must instead wrap it in an Arc (see
-//! // CounterHandle)
+//! // be awoken by value (because that would discard the counter), so we
+//! // must instead wrap it in an Arc (see CounterHandle)
 //! #[derive(Debug, Default)]
 //! struct Counter {
 //!     // We use atomic usize because we need Send + Sync and also interior

@@ -1,3 +1,7 @@
+//! `cooked-waker-derive` is a series of derive implementations for the traits
+//! in [`cooked-waker`](../cooked_waker). See that crate's
+//! documentation for more info.
+
 extern crate proc_macro;
 
 use proc_macro as pm;
