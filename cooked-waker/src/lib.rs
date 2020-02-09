@@ -162,21 +162,38 @@ pub use stowaway;
 
 /// Wakers that can wake by reference. This trait is used to enable a [`Wake`]
 /// implementation for types that don't own an underlying handle, like `Arc<T>`
-/// and `&'static T`.
+/// and `&T`.
+///
+/// This trait can be derived for `struct` types that have a single field that
+/// implements `RefWake`. Unlike [`IntoWaker`], this can even be derived for
+/// generic types and will correctly set up the relevant trait bounds, but note
+/// that [`IntoWaker`] can still only be derived for concrete types.
 pub trait WakeRef {
     /// Wake up the task by reference. In general [`Wake::wake`] should be
     /// preferred, if available, as it's probably more efficient.
     ///
-    /// This function is called by [`Waker::wake_by_ref`]
+    /// This function should be called by [`Waker::wake_by_ref`]; a derived
+    /// `IntoWaker` implementation will set this up automatically.
     fn wake_by_ref(&self);
 }
 
-/// Wakers that can wake by value. This is the primary means of waking a task
+/// Wakers that can wake by value. This is the primary means of waking a task.
+///
+/// This trait is implemented for most container types, like `Box<T: Wake>`
+/// and `Option<T: Wake>`. It is also implemented for shared pointer types like
+/// `Arc<T>` and `&T`, but those implementations call `T::wake_by_ref`, because
+/// they don't have ownership of the underlying `T`.
+///
+/// This trait can be derived for `struct` types that have a single field that
+/// implements [`Wake`]. Unlike [`IntoWaker`], this can even be derived for
+/// generic types and will correctly set up the relevant trait bounds, but note
+/// that [`IntoWaker`] can still only be derived for concrete types.
 pub trait Wake: WakeRef + Sized {
     /// Wake up the task by value. By default, this simply calls
     /// [`WakeRef::wake_by_ref`].
     ///
-    /// This function is called by [`Waker::wake`]
+    /// This function should be called by [`Waker::wake`]; a derived
+    /// `IntoWaker` implementation will set this up automatically.
     fn wake(self) {
         self.wake_by_ref()
     }
@@ -184,22 +201,26 @@ pub trait Wake: WakeRef + Sized {
 
 /// Objects that can be converted into an [`Waker`]. You should
 /// usually be able to derive this trait for any concrete type that implements
-/// [`Waker`] and [`Clone`].
+/// [`Wake + Clone + Send + Sync + 'static`].
 ///
 /// Note that, due to limitations in how generics interact with statics, it
 /// is not currently possible to implement this trait generically (otherwise
-/// we'd simply have a global implementation for all `T: Waker + Clone`.)
+/// we'd simply have a global implementation for all `T: Wake + Clone`).
 /// Therefore, any implementation must manually create a
-/// [`RawWakerVTable`][core::task::RawWakerVTable] associated
+/// [`RawWakerVTable`] associated
 /// with the concrete type `Self`, and find a way to convert `Self` to and
 /// from a `RawWaker`.
 ///
 /// This trait can be derived for any *concrete* type. This derive sets up a
-/// `RawWakerVTable` for the type, and arranges a conversion into a `Waker`
+/// [`RawWakerVTable`] for the type, and arranges a conversion into a [`Waker`]
 /// through the `stowaway` crate, which allows packing the bytes of any sized
-/// type into a pointer (boxing it if it's too large to fit). This Waker will
-/// then call the relevant `Wake`, `RefWake`, or `Clone` methods throughout its
-/// lifecycle.
+/// type into a pointer (boxing it if it's too large to fit). This means that
+/// "large" waker structs will simply be boxed, but wakers that contain a
+/// single `Box` or `Arc` field will simply move their pointer directly. This
+/// `Waker` will then call the relevant `Wake`, `RefWake`, or `Clone` methods
+/// throughout its lifecycle.
+///
+/// [`RawWakerVTable`]: core::task::RawWakerVTable
 pub trait IntoWaker: Wake + Clone + Send + Sync + 'static {
     /// Convert this object into a `Waker`.
     #[must_use]

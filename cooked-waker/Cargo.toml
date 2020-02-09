@@ -1,6 +1,6 @@
 [package]
 name = "cooked-waker"
-version = "1.0.0"
+version = "1.0.1"
 authors = ["Nathan West <Lucretiel@gmail.com>"]
 edition = "2018"
 readme = "../README.md"
@@ -17,7 +17,7 @@ optional = true
 
 [dependencies.cooked-waker-derive]
 path = "../cooked-waker-derive"
-version = "1.0.0"
+version = "1.0.1"
 optional = true
 
 [features]
