@@ -3,13 +3,7 @@ use std::{sync::Arc, task::Waker};
 
 #[derive(Debug, Clone, IntoWaker)]
 struct CustomWaker {
-    id: i128,
-}
-
-impl CustomWaker {
-    fn new(id: i128) -> Self {
-        Self { id }
-    }
+    id: i64,
 }
 
 impl WakeRef for CustomWaker {
@@ -37,7 +31,7 @@ struct SharedWaker {
 
 fn main() {
     println!("Hello, world!");
-    let waker = CustomWaker::new(11);
+    let waker = CustomWaker { id: 11 };
     let waker: Waker = waker.into_waker();
 
     println!("Waker: {:?}", waker);
