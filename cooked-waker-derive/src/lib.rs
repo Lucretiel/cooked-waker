@@ -18,6 +18,20 @@ use syn::{self, parse_macro_input, parse_quote, Data, DeriveInput, Fields};
 /// a Waker.
 ///
 /// Note that `IntoWaker` requires `Wake + Clone + Send + Sync + 'static`.
+///
+/// # Interior mutability note
+///
+/// Note that, in some rare circumstances, interior mutability may not be
+/// respected in the by-reference methods (clone and wake_by_ref). This will
+/// happen if your struct is <= the size of a pointer, and if you attempt to
+/// mutate the bytes of the struct directly through shared mutability. In this
+/// case, the struct bytes are stored directly in the pointer. These bytes are
+/// copied into the relevant functions, but it is assumed they never chage, so
+/// if the `wake_by_ref` or `clone` methods change these bytes (for instance,
+/// if your waker is a Cell<Option<Box<T>>>), these changes will NOT be
+/// reflected in subsequent calls. If you *need* interior mutability on a small
+/// struct, you can manually Box it in a wrapper struct and derive `IntoWaker`
+/// on the wrapper.
 #[proc_macro_derive(IntoWaker)]
 pub fn into_waker_derive(stream: pm::TokenStream) -> pm::TokenStream {
     let input = parse_macro_input!(stream as DeriveInput);
@@ -38,16 +52,18 @@ pub fn into_waker_derive(stream: pm::TokenStream) -> pm::TokenStream {
                 use cooked_waker::{Wake, WakeRef};
                 use cooked_waker::stowaway::{self, Stowaway};
 
-                let stowed = Stowaway::new(self);
+                #[inline]
+                fn make_raw_waker(waker: #WakerStruct) -> RawWaker {
+                    let stowed = Stowaway::new(waker);
+                    RawWaker::new(Stowaway::into_raw(stowed), &VTABLE)
+                }
 
                 static VTABLE: RawWakerVTable = RawWakerVTable::new(
                     // clone
                     |raw| {
                         let raw = raw as *mut ();
                         let waker: & #WakerStruct = unsafe { stowaway::ref_from_stowed(&raw) };
-                        let cloned: #WakerStruct = Clone::clone(waker);
-                        let stowed_clone = stowaway::stow(cloned);
-                        RawWaker::new(stowed_clone, &VTABLE)
+                        make_raw_waker(Clone::clone(waker))
                     },
                     // wake by value
                     |raw| {
@@ -68,7 +84,7 @@ pub fn into_waker_derive(stream: pm::TokenStream) -> pm::TokenStream {
                     },
                 );
 
-                let raw_waker = RawWaker::new(Stowaway::into_raw(stowed), &VTABLE);
+                let raw_waker = make_raw_waker(self);
                 unsafe { Waker::from_raw(raw_waker) }
             }
         }
