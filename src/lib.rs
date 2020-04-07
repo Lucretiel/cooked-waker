@@ -110,6 +110,10 @@
 //! let waker2 = waker.clone();
 //! waker2.wake_by_ref();
 //!
+//! // Because IntoWaker wrap the pointer directly, without additional
+//! // boxing, we can use will_wake
+//! assert!(waker.will_wake(&waker2));
+//!
 //! // This calls Counter::wake_by_ref because the Arc doesn't have exclusive
 //! // ownership of the underlying Counter
 //! waker2.wake();
