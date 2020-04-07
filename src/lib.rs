@@ -9,15 +9,11 @@
 //! [`wake`][Waker::wake] and [`wake_by_ref`][Waker::wake_by_ref] methods
 //! on [`std::task::Waker`][Waker], and it provides implenetations of these
 //! types for the common reference & pointer types (`Arc`, `Rc`, `&'static`,
-//! etc). These traits can also be derived for structs that have a single field
-//! that implements `Wake` or `WakeRef`
+//! etc).
 //!
 //! Additionally, it provides [`IntoWaker`], which allows converting any
-//! `Wake + Clone` type into a [`Waker`]. Unfortunately, of limitations in
-//! how generics interact with static, it's not possible to implement this
-//! trait generically. We therefore instead provide a derive that can be
-//! applied to any *concrete* type; see the [`IntoWaker`] documentation for
-//! more information.
+//! `Wake + Clone` type into a [`Waker`]. This trait is automatically derived
+//! for any `Wake + Clone + Send + Sync + 'static` type.
 //!
 //! # Basic example
 //!
@@ -31,9 +27,8 @@
 //! static drop_count: AtomicUsize = AtomicUsize::new(0);
 //!
 //! // A simple Waker struct that atomically increments the relevant static
-//! // counters. We can derive IntoWaker on it because it implenments Wake
-//! // and Clone.
-//! #[derive(Debug, Clone, IntoWaker)]
+//! // counters.
+//! #[derive(Debug, Clone)]
 //! struct StaticWaker;
 //!
 //! impl WakeRef for StaticWaker {
@@ -84,7 +79,7 @@
 //!
 //! // A simple struct that counts the number of times it is awoken. Can't
 //! // be awoken by value (because that would discard the counter), so we
-//! // must instead wrap it in an Arc (see CounterHandle)
+//! // must instead wrap it in an Arc.
 //! #[derive(Debug, Default)]
 //! struct Counter {
 //!     // We use atomic usize because we need Send + Sync and also interior
@@ -104,27 +99,10 @@
 //!     }
 //! }
 //!
-//! // A shared handle to a Counter.
-//! //
-//! // We can derive Wake and WakeRef because the inner field implements
-//! // them, and we can derive IntoWaker because this is a concrete type
-//! // with Wake + Clone + Send + Sync. Note that *any* concrete type can have
-//! // IntoWaker implemented for it; it doesn't have to be "pointer-sized"
-//! #[derive(Debug, Clone, Default, WakeRef, Wake, IntoWaker)]
-//! struct CounterHandle {
-//!     counter: Arc<Counter>,
-//! }
-//!
-//! impl CounterHandle {
-//!     fn get(&self) -> usize {
-//!         self.counter.get()
-//!     }
-//! }
-//!
-//! let counter = CounterHandle::default();
+//! let counter_handle = Arc::new(Counter::default());
 //!
 //! // Create an std::task::Waker
-//! let waker: Waker = counter.clone().into_waker();
+//! let waker: Waker = counter_handle.clone().into_waker();
 //!
 //! waker.wake_by_ref();
 //! waker.wake_by_ref();
@@ -136,44 +114,30 @@
 //! // ownership of the underlying Counter
 //! waker2.wake();
 //!
-//! assert_eq!(counter.get(), 4);
+//! assert_eq!(counter_handle.get(), 4);
 //! ```
 
 extern crate alloc;
 
-#[cfg(feature = "derive")]
-#[allow(unused_imports)]
-#[macro_use]
-extern crate cooked_waker_derive;
-
-#[cfg(feature = "derive")]
-pub use cooked_waker_derive::*;
-
 use alloc::boxed::Box;
 use alloc::rc;
 use alloc::sync as arc;
-use core::task::Waker;
+use core::task::{RawWaker, RawWakerVTable, Waker};
 
-// Needed so that the derive macro can use it without requiring downstream
-// users to list it as a dependency
-#[cfg(feature = "derive")]
-#[doc(hidden)]
-pub use stowaway;
+use stowaway::{self, Stowaway};
 
 /// Wakers that can wake by reference. This trait is used to enable a [`Wake`]
 /// implementation for types that don't own an underlying handle, like `Arc<T>`
 /// and `&T`.
 ///
-/// This trait can be derived for `struct` types that have a single field that
-/// implements `RefWake`. Unlike [`IntoWaker`], this can even be derived for
-/// generic types and will correctly set up the relevant trait bounds, but note
-/// that [`IntoWaker`] can still only be derived for concrete types.
+/// This trait is implemented for most container and reference types, like
+/// `&T where T: WakeRef`, `Box<T: WakeRef>`, and `Arc<T: WakeRef>`.
 pub trait WakeRef {
     /// Wake up the task by reference. In general [`Wake::wake`] should be
     /// preferred, if available, as it's probably more efficient.
     ///
-    /// This function should be called by [`Waker::wake_by_ref`]; a derived
-    /// `IntoWaker` implementation will set this up automatically.
+    /// A [`Waker`] created by [`IntoWaker`] will call this method through
+    /// [`Waker::wake_by_ref`].
     fn wake_by_ref(&self);
 }
 
@@ -183,51 +147,88 @@ pub trait WakeRef {
 /// and `Option<T: Wake>`. It is also implemented for shared pointer types like
 /// `Arc<T>` and `&T`, but those implementations call `T::wake_by_ref`, because
 /// they don't have ownership of the underlying `T`.
-///
-/// This trait can be derived for `struct` types that have a single field that
-/// implements [`Wake`]. Unlike [`IntoWaker`], this can even be derived for
-/// generic types and will correctly set up the relevant trait bounds, but note
-/// that [`IntoWaker`] can still only be derived for concrete types.
 pub trait Wake: WakeRef + Sized {
     /// Wake up the task by value. By default, this simply calls
     /// [`WakeRef::wake_by_ref`].
     ///
-    /// This function should be called by [`Waker::wake`]; a derived
-    /// `IntoWaker` implementation will set this up automatically.
+    /// A [`Waker`] created by [`IntoWaker`] will call this method through
+    /// [`Waker::wake`].
+    #[inline]
     fn wake(self) {
         self.wake_by_ref()
     }
 }
 
-/// Objects that can be converted into an [`Waker`]. You should
-/// usually be able to derive this trait for any concrete type that implements
-/// [`Wake + Clone + Send + Sync + 'static`].
+/// Objects that can be converted into an [`Waker`]. This trait is
+/// automatically implemented for any `Wake + Clone + Send + Sync + 'static`
+/// type.
 ///
-/// Note that, due to limitations in how generics interact with statics, it
-/// is not currently possible to implement this trait generically (otherwise
-/// we'd simply have a global implementation for all `T: Wake + Clone`).
-/// Therefore, any implementation must manually create a
-/// [`RawWakerVTable`] associated
-/// with the concrete type `Self`, and find a way to convert `Self` to and
-/// from a `RawWaker`.
+/// The implementation of this trait sets up a [`RawWakerVTable`] for the type,
+/// and arranges a conversion into a [`Waker`] through the [`stowaway`] crate,
+/// which allows packing the bytes of any sized type into a pointer (boxing it
+/// if it's too large to fit). This means that "large" waker structs will
+/// simply be boxed, but wakers that contain a single `Box` or `Arc` field
+/// (or any data smaller or the same size as a pointer) will simply move their
+/// pointer directly. This `Waker` will then call the relevant `Wake`,
+/// `RefWake`, or `Clone` methods throughout its lifecycle.
 ///
-/// This trait can be derived for any *concrete* type. This derive sets up a
-/// [`RawWakerVTable`] for the type, and arranges a conversion into a [`Waker`]
-/// through the `stowaway` crate, which allows packing the bytes of any sized
-/// type into a pointer (boxing it if it's too large to fit). This means that
-/// "large" waker structs will simply be boxed, but wakers that contain a
-/// single `Box` or `Arc` field will simply move their pointer directly. This
-/// `Waker` will then call the relevant `Wake`, `RefWake`, or `Clone` methods
-/// throughout its lifecycle.
+/// It should never be necessary to implement this trait manually.
 ///
 /// [`RawWakerVTable`]: core::task::RawWakerVTable
+/// [`Waker`]: core::task::Waker
+/// [`stowaway`]: https://docs.rs/stowaway
 pub trait IntoWaker: Wake + Clone + Send + Sync + 'static {
+    /// The RawWakerVTable for this type. This should never be used directly;
+    /// it is entirely handled by `into_waker`. It is present as an associated
+    /// const because that's the only way for it to work in generic contexts.
+    #[doc(hidden)]
+    const VTABLE: &'static RawWakerVTable;
+
     /// Convert this object into a `Waker`.
     #[must_use]
     fn into_waker(self) -> Waker;
 }
 
-// Waker implementations for std types.
+impl<T: Wake + Clone + Send + Sync + 'static> IntoWaker for T {
+    const VTABLE: &'static RawWakerVTable = &RawWakerVTable::new(
+        // clone
+        |raw| {
+            let raw = raw as *mut ();
+            let waker: &T = unsafe { stowaway::ref_from_stowed(&raw) };
+            let cloned = waker.clone();
+            let stowed = Stowaway::new(cloned);
+            RawWaker::new(Stowaway::into_raw(stowed), T::VTABLE)
+        },
+        // wake by value
+        |raw| {
+            let waker: T = unsafe { stowaway::unstow(raw as *mut ()) };
+            Wake::wake(waker);
+        },
+        // wake by ref
+        |raw| {
+            let raw = raw as *mut ();
+            let waker: &T = unsafe { stowaway::ref_from_stowed(&raw) };
+            WakeRef::wake_by_ref(waker)
+        },
+        // Drop
+        |raw| {
+            let _waker: Stowaway<T> = unsafe { Stowaway::from_raw(raw as *mut ()) };
+        },
+    );
+
+    fn into_waker(self) -> Waker {
+        let stowed = Stowaway::new(self);
+        let raw_waker = RawWaker::new(Stowaway::into_raw(stowed), T::VTABLE);
+        unsafe { Waker::from_raw(raw_waker) }
+    }
+}
+
+// Waker implementations for std types. Feel free to open PRs for additional
+// stdlib types here.
+
+// We'd prefer to implement WakeRef for T: Deref<Target=WakeRef>, but that
+// results in type coherence issues with non-deref stdlib types.
+
 impl<T: WakeRef> WakeRef for &T {
     #[inline]
     fn wake_by_ref(&self) {
@@ -295,7 +296,7 @@ impl<T: WakeRef + ?Sized> Wake for rc::Weak<T> {}
 impl<T: WakeRef> WakeRef for Option<T> {
     #[inline]
     fn wake_by_ref(&self) {
-        if let Some(ref waker) = *self {
+        if let Some(waker) = self {
             waker.wake_by_ref()
         }
     }
@@ -321,12 +322,5 @@ impl Wake for Waker {
     #[inline]
     fn wake(self) {
         Waker::wake(self)
-    }
-}
-
-impl IntoWaker for Waker {
-    #[inline]
-    fn into_waker(self) -> Waker {
-        self
     }
 }
