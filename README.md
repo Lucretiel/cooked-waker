@@ -10,7 +10,7 @@ Additionally, it provides `IntoWaker`, which allows converting any `Wake + Clone
 
 # Basic example
 
-```
+```rust
 use cooked_waker::{Wake, WakeRef, IntoWaker};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Waker;
@@ -64,7 +64,7 @@ assert_eq!(drop_count.load(Ordering::SeqCst), 2);
 
 # Arc example
 
-```
+```rust
 use cooked_waker::{Wake, WakeRef, IntoWaker};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
