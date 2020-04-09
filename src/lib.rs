@@ -1,9 +1,9 @@
 #![no_std]
 
 //! cooked_waker provides safe traits for working with
-//! [`std::task::Waker`][Waker] and, more importantly, a set of derives for
-//! safely converting normal, safe rust types into `Waker` instances. It cooks
-//! `RawWaker` and `RawWakerVTable`, making them safe for consumption.
+//! [`std::task::Waker`][Waker] and creating those wakers out of regular, safe
+//! Rust structs. It cooks `RawWaker` and `RawWakerVTable`, making them safe
+//! for consumption.
 //!
 //! It provides the [`Wake`] and [`WakeRef`] traits, which correspond to the
 //! [`wake`][Waker::wake] and [`wake_by_ref`][Waker::wake_by_ref] methods
