@@ -18,7 +18,7 @@
 //! # Basic example
 //!
 //! ```
-//! use cooked_waker::{Wake, WakeRef, IntoWaker};
+//! use cooked_waker::{Wake, WakeRef, IntoWaker, Stowable};
 //! use std::sync::atomic::{AtomicUsize, Ordering};
 //! use std::task::Waker;
 //!
@@ -48,6 +48,10 @@
 //!         drop_count.fetch_add(1, Ordering::SeqCst);
 //!     }
 //! }
+//!
+//! // See the stowaway docs for a description of this trait. Usually in
+//! // practice you'll be using an Arc or Box, which require no unsafe.
+//! unsafe impl Stowable for StaticWaker {}
 //!
 //! assert_eq!(drop_count.load(Ordering::SeqCst), 0);
 //!
@@ -128,6 +132,7 @@ use alloc::rc;
 use alloc::sync as arc;
 use core::task::{RawWaker, RawWakerVTable, Waker};
 
+pub use stowaway::Stowable;
 use stowaway::{self, Stowaway};
 
 /// Wakers that can wake by reference. This trait is used to enable a [`Wake`]
@@ -164,8 +169,8 @@ pub trait Wake: WakeRef + Sized {
 }
 
 /// Objects that can be converted into an [`Waker`]. This trait is
-/// automatically implemented for any `Wake + Clone + Send + Sync + 'static`
-/// type.
+/// automatically implemented for any `Wake + Clone + Send + Sync + 'static +
+/// Stowable` type.
 ///
 /// The implementation of this trait sets up a [`RawWakerVTable`] for the type,
 /// and arranges a conversion into a [`Waker`] through the [`stowaway`] crate,
@@ -181,7 +186,7 @@ pub trait Wake: WakeRef + Sized {
 /// [`RawWakerVTable`]: core::task::RawWakerVTable
 /// [`Waker`]: core::task::Waker
 /// [`stowaway`]: https://docs.rs/stowaway
-pub trait IntoWaker: Wake + Clone + Send + Sync + 'static {
+pub trait IntoWaker: Wake + Clone + Send + Sync + 'static + Stowable {
     /// The RawWakerVTable for this type. This should never be used directly;
     /// it is entirely handled by `into_waker`. It is present as an associated
     /// const because that's the only way for it to work in generic contexts.
@@ -193,7 +198,7 @@ pub trait IntoWaker: Wake + Clone + Send + Sync + 'static {
     fn into_waker(self) -> Waker;
 }
 
-impl<T: Wake + Clone + Send + Sync + 'static> IntoWaker for T {
+impl<T: Wake + Clone + Send + Sync + 'static + Stowable> IntoWaker for T {
     const VTABLE: &'static RawWakerVTable = &RawWakerVTable::new(
         // clone
         |raw| {

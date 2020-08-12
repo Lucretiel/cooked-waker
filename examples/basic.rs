@@ -1,4 +1,4 @@
-use cooked_waker::{IntoWaker, Wake, WakeRef};
+use cooked_waker::{IntoWaker, Stowable, Wake, WakeRef};
 use std::{sync::Arc, task::Waker};
 
 #[derive(Debug, Clone)]
@@ -23,6 +23,8 @@ impl Drop for CustomWaker {
         println!("dropping waker: {}", self.id);
     }
 }
+
+unsafe impl Stowable for CustomWaker {}
 
 fn main() {
     println!("Hello, world!");
