@@ -18,7 +18,7 @@
 //! # Basic example
 //!
 //! ```
-//! use cooked_waker::{Wake, WakeRef, IntoWaker, Stowable};
+//! use cooked_waker::{Wake, WakeRef, IntoWaker, ViaRawPointer};
 //! use std::sync::atomic::{AtomicUsize, Ordering};
 //! use std::task::Waker;
 //!
@@ -49,9 +49,22 @@
 //!     }
 //! }
 //!
-//! // See the stowaway docs for a description of this trait. Usually in
-//! // practice you'll be using an Arc or Box, which require no unsafe.
-//! unsafe impl Stowable for StaticWaker {}
+//! // Usually in practice you'll be using an Arc or Box, which already
+//! // implement this, so there will be no need to implement it yourself.
+//! impl ViaRawPointer for StaticWaker {
+//!     type Target = ();
+//!
+//!     fn into_raw(self) -> *mut () {
+//!         // Need to forget self because we're being converted into a pointer,
+//!         // so destructors should not run.
+//!         std::mem::forget(self);
+//!         std::ptr::null_mut()
+//!     }
+//!
+//!     unsafe fn from_raw(ptr: *mut ()) -> Self {
+//!         StaticWaker
+//!     }
+//! }
 //!
 //! assert_eq!(drop_count.load(Ordering::SeqCst), 0);
 //!
@@ -130,10 +143,30 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::rc;
 use alloc::sync as arc;
-use core::task::{RawWaker, RawWakerVTable, Waker};
+use core::{
+    ptr,
+    task::{RawWaker, RawWakerVTable, Waker},
+};
 
-pub use stowaway::Stowable;
-use stowaway::{self, Stowaway};
+/// Trait for types that can be converted into raw pointers and back again.
+/// Implementors must ensure that, for a given object, the pointer remains
+/// fixed as long as no mutable operations are performed (that is, calling
+/// from_ptr() followed by into_ptr(), with no mutable operations in between,
+/// the returned pointer has the same value.)
+///
+/// In the future, we hope to have a similar trait added to the standard
+/// library; see https://github.com/rust-lang/rust/issues/75846 for details.
+pub trait ViaRawPointer {
+    type Target: ?Sized;
+
+    /// Convert this object into a raw pointer.
+    fn into_raw(self) -> *mut Self::Target;
+
+    /// Convert a raw pointer back into this object. This method must ONLY be
+    /// called on a pointer that was received via `Self::into_raw`, and that
+    /// pointer must not be used afterwards.
+    unsafe fn from_raw(ptr: *mut Self::Target) -> Self;
+}
 
 /// Wakers that can wake by reference. This trait is used to enable a [`Wake`]
 /// implementation for types that don't own an underlying handle, like `Arc<T>`
@@ -169,24 +202,27 @@ pub trait Wake: WakeRef + Sized {
 }
 
 /// Objects that can be converted into an [`Waker`]. This trait is
-/// automatically implemented for any `Wake + Clone + Send + Sync + 'static +
-/// Stowable` type.
+/// automatically implemented for types that fulfill the waker interface.
+/// Such types must be:
+/// - [`Clone`]
+/// - `Send + Sync`
+/// - `'static`
+/// - [`Wake`]
+/// - [`ViaRawPointer`]
 ///
 /// The implementation of this trait sets up a [`RawWakerVTable`] for the type,
-/// and arranges a conversion into a [`Waker`] through the [`stowaway`] crate,
-/// which allows packing the bytes of any sized type into a pointer (boxing it
-/// if it's too large to fit). This means that "large" waker structs will
-/// simply be boxed, but wakers that contain a single `Box` or `Arc` field
-/// (or any data smaller or the same size as a pointer) will simply move their
-/// pointer directly. This `Waker` will then call the relevant `Wake`,
-/// `RefWake`, or `Clone` methods throughout its lifecycle.
+/// and arranges a conversion into a [`Waker`] through the [`ViaRawPointer`]
+/// trait, which should be implemented for types that be converted to and from
+/// pointers. This trait is implemented for all the standard library pointer
+/// types (such as `Arc` and `Box`), and you can implement it on your own types
+/// if you want to use them for wakers.
 ///
 /// It should never be necessary to implement this trait manually.
 ///
 /// [`RawWakerVTable`]: core::task::RawWakerVTable
 /// [`Waker`]: core::task::Waker
-/// [`stowaway`]: https://docs.rs/stowaway
-pub trait IntoWaker: Wake + Clone + Send + Sync + 'static + Stowable {
+/// [`Clone`]: core::clone::Clone
+pub trait IntoWaker {
     /// The RawWakerVTable for this type. This should never be used directly;
     /// it is entirely handled by `into_waker`. It is present as an associated
     /// const because that's the only way for it to work in generic contexts.
@@ -198,36 +234,53 @@ pub trait IntoWaker: Wake + Clone + Send + Sync + 'static + Stowable {
     fn into_waker(self) -> Waker;
 }
 
-impl<T: Wake + Clone + Send + Sync + 'static + Stowable> IntoWaker for T {
+impl<T> IntoWaker for T
+where
+    T: Wake + Clone + Send + Sync + 'static + ViaRawPointer,
+    T::Target: Sized,
+{
     const VTABLE: &'static RawWakerVTable = &RawWakerVTable::new(
         // clone
         |raw| {
-            let raw = raw as *mut ();
-            let waker: &T = unsafe { stowaway::ref_from_stowed(&raw) };
+            let raw = raw as *mut T::Target;
+
+            let waker: T = unsafe { ViaRawPointer::from_raw(raw) };
             let cloned = waker.clone();
-            let stowed = Stowaway::new(cloned);
-            RawWaker::new(Stowaway::into_raw(stowed), T::VTABLE)
+
+            // We can't save the `into_raw` back into the raw waker, so we must
+            // simply assert that the pointer has remained the same. This is
+            // part of the ViaRawPointer safety contract, so we only check it
+            // in debug builds.
+            debug_assert_eq!(waker.into_raw(), raw);
+
+            let cloned_raw = cloned.into_raw();
+            let cloned_raw = cloned_raw as *const ();
+            RawWaker::new(cloned_raw, T::VTABLE)
         },
         // wake by value
         |raw| {
-            let waker: T = unsafe { stowaway::unstow(raw as *mut ()) };
-            Wake::wake(waker);
+            let raw = raw as *mut T::Target;
+            let waker: T = unsafe { ViaRawPointer::from_raw(raw) };
+            waker.wake();
         },
         // wake by ref
         |raw| {
-            let raw = raw as *mut ();
-            let waker: &T = unsafe { stowaway::ref_from_stowed(&raw) };
-            WakeRef::wake_by_ref(waker)
+            let raw = raw as *mut T::Target;
+            let waker: T = unsafe { ViaRawPointer::from_raw(raw) };
+            waker.wake_by_ref();
+            debug_assert_eq!(waker.into_raw(), raw);
         },
         // Drop
         |raw| {
-            let _waker: Stowaway<T> = unsafe { Stowaway::from_raw(raw as *mut ()) };
+            let raw = raw as *mut T::Target;
+            let _waker: T = unsafe { ViaRawPointer::from_raw(raw) };
         },
     );
 
     fn into_waker(self) -> Waker {
-        let stowed = Stowaway::new(self);
-        let raw_waker = RawWaker::new(Stowaway::into_raw(stowed), T::VTABLE);
+        let raw = self.into_raw();
+        let raw = raw as *const ();
+        let raw_waker = RawWaker::new(raw, T::VTABLE);
         unsafe { Waker::from_raw(raw_waker) }
     }
 }
@@ -238,14 +291,26 @@ impl<T: Wake + Clone + Send + Sync + 'static + Stowable> IntoWaker for T {
 // We'd prefer to implement WakeRef for T: Deref<Target=WakeRef>, but that
 // results in type coherence issues with non-deref stdlib types.
 
-impl<T: WakeRef> WakeRef for &T {
+impl<T: WakeRef + ?Sized> WakeRef for &T {
     #[inline]
     fn wake_by_ref(&self) {
         T::wake_by_ref(*self)
     }
 }
 
-impl<T: WakeRef> Wake for &T {}
+impl<T: WakeRef + ?Sized> Wake for &T {}
+
+impl<T: ?Sized> ViaRawPointer for Box<T> {
+    type Target = T;
+
+    fn into_raw(self) -> *mut T {
+        Box::into_raw(self)
+    }
+
+    unsafe fn from_raw(ptr: *mut T) -> Self {
+        Box::from_raw(ptr)
+    }
+}
 
 impl<T: WakeRef + ?Sized> WakeRef for Box<T> {
     #[inline]
@@ -261,6 +326,18 @@ impl<T: Wake> Wake for Box<T> {
     }
 }
 
+impl<T: ?Sized> ViaRawPointer for arc::Arc<T> {
+    type Target = T;
+
+    fn into_raw(self) -> *mut T {
+        arc::Arc::into_raw(self) as *mut T
+    }
+
+    unsafe fn from_raw(ptr: *mut T) -> Self {
+        arc::Arc::from_raw(ptr as *const T)
+    }
+}
+
 impl<T: WakeRef + ?Sized> WakeRef for arc::Arc<T> {
     #[inline]
     fn wake_by_ref(&self) {
@@ -269,6 +346,18 @@ impl<T: WakeRef + ?Sized> WakeRef for arc::Arc<T> {
 }
 
 impl<T: WakeRef + ?Sized> Wake for arc::Arc<T> {}
+
+impl<T> ViaRawPointer for arc::Weak<T> {
+    type Target = T;
+
+    fn into_raw(self) -> *mut T {
+        arc::Weak::into_raw(self) as *mut T
+    }
+
+    unsafe fn from_raw(ptr: *mut T) -> Self {
+        arc::Weak::from_raw(ptr as *const T)
+    }
+}
 
 impl<T: WakeRef + ?Sized> WakeRef for arc::Weak<T> {
     #[inline]
@@ -286,10 +375,34 @@ impl<T: WakeRef + ?Sized> WakeRef for rc::Rc<T> {
     }
 }
 
+impl<T: ?Sized> ViaRawPointer for rc::Rc<T> {
+    type Target = T;
+
+    fn into_raw(self) -> *mut T {
+        rc::Rc::into_raw(self) as *mut T
+    }
+
+    unsafe fn from_raw(ptr: *mut T) -> Self {
+        rc::Rc::from_raw(ptr as *const T)
+    }
+}
+
 impl<T: WakeRef + ?Sized> Wake for rc::Rc<T> {
     #[inline]
     fn wake(self) {
         T::wake_by_ref(self.as_ref())
+    }
+}
+
+impl<T> ViaRawPointer for rc::Weak<T> {
+    type Target = T;
+
+    fn into_raw(self) -> *mut T {
+        rc::Weak::into_raw(self) as *mut T
+    }
+
+    unsafe fn from_raw(ptr: *mut T) -> Self {
+        rc::Weak::from_raw(ptr as *const T)
     }
 }
 
@@ -301,6 +414,27 @@ impl<T: WakeRef + ?Sized> WakeRef for rc::Weak<T> {
 }
 
 impl<T: WakeRef + ?Sized> Wake for rc::Weak<T> {}
+
+impl<T: ViaRawPointer> ViaRawPointer for Option<T>
+where
+    T::Target: Sized,
+{
+    type Target = T::Target;
+
+    fn into_raw(self) -> *mut Self::Target {
+        match self {
+            Some(value) => value.into_raw(),
+            None => ptr::null_mut(),
+        }
+    }
+
+    unsafe fn from_raw(ptr: *mut Self::Target) -> Self {
+        match ptr.is_null() {
+            false => Some(T::from_raw(ptr)),
+            true => None,
+        }
+    }
+}
 
 impl<T: WakeRef> WakeRef for Option<T> {
     #[inline]

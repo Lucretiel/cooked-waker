@@ -1,9 +1,9 @@
-use cooked_waker::{IntoWaker, Stowable, Wake, WakeRef};
+use cooked_waker::{IntoWaker, ViaRawPointer, Wake, WakeRef};
 use std::{sync::Arc, task::Waker};
 
 #[derive(Debug, Clone)]
 struct CustomWaker {
-    id: i64,
+    id: i32,
 }
 
 impl WakeRef for CustomWaker {
@@ -24,7 +24,17 @@ impl Drop for CustomWaker {
     }
 }
 
-unsafe impl Stowable for CustomWaker {}
+impl ViaRawPointer for CustomWaker {
+    type Target = ();
+
+    fn into_raw(self) -> *mut Self::Target {
+        self.id as *mut ()
+    }
+
+    unsafe fn from_raw(ptr: *mut Self::Target) -> Self {
+        Self { id: ptr as i32 }
+    }
+}
 
 fn main() {
     println!("Hello, world!");
