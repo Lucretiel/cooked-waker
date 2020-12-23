@@ -24,7 +24,7 @@ impl Drop for CustomWaker {
     }
 }
 
-impl ViaRawPointer for CustomWaker {
+unsafe impl ViaRawPointer for CustomWaker {
     type Target = ();
 
     fn into_raw(self) -> *mut Self::Target {
