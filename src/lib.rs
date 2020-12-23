@@ -51,7 +51,7 @@
 //!
 //! // Usually in practice you'll be using an Arc or Box, which already
 //! // implement this, so there will be no need to implement it yourself.
-//! impl ViaRawPointer for StaticWaker {
+//! unsafe impl ViaRawPointer for StaticWaker {
 //!     type Target = ();
 //!
 //!     fn into_raw(self) -> *mut () {
@@ -144,6 +144,7 @@ use alloc::boxed::Box;
 use alloc::rc;
 use alloc::sync as arc;
 use core::{
+    mem::ManuallyDrop,
     ptr,
     task::{RawWaker, RawWakerVTable, Waker},
 };
@@ -152,11 +153,13 @@ use core::{
 /// Implementors must ensure that, for a given object, the pointer remains
 /// fixed as long as no mutable operations are performed (that is, calling
 /// from_ptr() followed by into_ptr(), with no mutable operations in between,
-/// the returned pointer has the same value.)
+/// the returned pointer has the same value.) Implementors also must not panic
+/// when the interface is used correctly. The Waker constructed by IntoWaker
+/// can cause a double drop if either of these functions panic.
 ///
 /// In the future, we hope to have a similar trait added to the standard
 /// library; see https://github.com/rust-lang/rust/issues/75846 for details.
-pub trait ViaRawPointer {
+pub unsafe trait ViaRawPointer {
     type Target: ?Sized;
 
     /// Convert this object into a raw pointer.
@@ -244,14 +247,14 @@ where
         |raw| {
             let raw = raw as *mut T::Target;
 
-            let waker: T = unsafe { ViaRawPointer::from_raw(raw) };
-            let cloned = waker.clone();
+            let waker = ManuallyDrop::<T>::new(unsafe { ViaRawPointer::from_raw(raw) });
+            let cloned: T = (*waker).clone();
 
             // We can't save the `into_raw` back into the raw waker, so we must
             // simply assert that the pointer has remained the same. This is
             // part of the ViaRawPointer safety contract, so we only check it
             // in debug builds.
-            debug_assert_eq!(waker.into_raw(), raw);
+            debug_assert_eq!(ManuallyDrop::into_inner(waker).into_raw(), raw);
 
             let cloned_raw = cloned.into_raw();
             let cloned_raw = cloned_raw as *const ();
@@ -266,9 +269,10 @@ where
         // wake by ref
         |raw| {
             let raw = raw as *mut T::Target;
-            let waker: T = unsafe { ViaRawPointer::from_raw(raw) };
+            let waker = ManuallyDrop::<T>::new(unsafe { ViaRawPointer::from_raw(raw) });
             waker.wake_by_ref();
-            debug_assert_eq!(waker.into_raw(), raw);
+
+            debug_assert_eq!(ManuallyDrop::into_inner(waker).into_raw(), raw);
         },
         // Drop
         |raw| {
@@ -300,7 +304,7 @@ impl<T: WakeRef + ?Sized> WakeRef for &T {
 
 impl<T: WakeRef + ?Sized> Wake for &T {}
 
-impl<T: ?Sized> ViaRawPointer for Box<T> {
+unsafe impl<T: ?Sized> ViaRawPointer for Box<T> {
     type Target = T;
 
     fn into_raw(self) -> *mut T {
@@ -326,7 +330,7 @@ impl<T: Wake> Wake for Box<T> {
     }
 }
 
-impl<T: ?Sized> ViaRawPointer for arc::Arc<T> {
+unsafe impl<T: ?Sized> ViaRawPointer for arc::Arc<T> {
     type Target = T;
 
     fn into_raw(self) -> *mut T {
@@ -347,7 +351,7 @@ impl<T: WakeRef + ?Sized> WakeRef for arc::Arc<T> {
 
 impl<T: WakeRef + ?Sized> Wake for arc::Arc<T> {}
 
-impl<T> ViaRawPointer for arc::Weak<T> {
+unsafe impl<T> ViaRawPointer for arc::Weak<T> {
     type Target = T;
 
     fn into_raw(self) -> *mut T {
@@ -375,7 +379,7 @@ impl<T: WakeRef + ?Sized> WakeRef for rc::Rc<T> {
     }
 }
 
-impl<T: ?Sized> ViaRawPointer for rc::Rc<T> {
+unsafe impl<T: ?Sized> ViaRawPointer for rc::Rc<T> {
     type Target = T;
 
     fn into_raw(self) -> *mut T {
@@ -394,7 +398,7 @@ impl<T: WakeRef + ?Sized> Wake for rc::Rc<T> {
     }
 }
 
-impl<T> ViaRawPointer for rc::Weak<T> {
+unsafe impl<T> ViaRawPointer for rc::Weak<T> {
     type Target = T;
 
     fn into_raw(self) -> *mut T {
@@ -415,7 +419,7 @@ impl<T: WakeRef + ?Sized> WakeRef for rc::Weak<T> {
 
 impl<T: WakeRef + ?Sized> Wake for rc::Weak<T> {}
 
-impl<T: ViaRawPointer> ViaRawPointer for Option<T>
+unsafe impl<T: ViaRawPointer> ViaRawPointer for Option<T>
 where
     T::Target: Sized,
 {
@@ -465,5 +469,89 @@ impl Wake for Waker {
     #[inline]
     fn wake(self) {
         Waker::wake(self)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    extern crate std;
+
+    use super::*;
+    use std::panic;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::Waker;
+
+    static PANIC_WAKE_REF_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static PANIC_WAKE_VALUE_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static PANIC_DROP_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    #[derive(Debug, Clone)]
+    struct PanicWaker;
+
+    impl WakeRef for PanicWaker {
+        fn wake_by_ref(&self) {
+            PANIC_WAKE_REF_COUNT.fetch_add(1, Ordering::SeqCst);
+            panic!();
+        }
+    }
+
+    impl Wake for PanicWaker {
+        fn wake(self) {
+            PANIC_WAKE_VALUE_COUNT.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl Drop for PanicWaker {
+        fn drop(&mut self) {
+            PANIC_DROP_COUNT.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    unsafe impl ViaRawPointer for PanicWaker {
+        type Target = ();
+
+        fn into_raw(self) -> *mut () {
+            std::mem::forget(self);
+            std::ptr::null_mut()
+        }
+
+        unsafe fn from_raw(_ptr: *mut ()) -> Self {
+            PanicWaker
+        }
+    }
+
+    // Test that the wake_by_ref() behaves correctly even if it panics.
+    #[test]
+    fn panic_wake() {
+        assert_eq!(PANIC_DROP_COUNT.load(Ordering::SeqCst), 0);
+
+        let waker = PanicWaker;
+        {
+            let waker1: Waker = waker.into_waker();
+
+            let waker2: Waker = waker1.clone();
+
+            let result = panic::catch_unwind(|| {
+                waker2.wake_by_ref();
+            });
+            assert!(result.is_err());
+            assert_eq!(PANIC_WAKE_REF_COUNT.load(Ordering::SeqCst), 1);
+            assert_eq!(PANIC_DROP_COUNT.load(Ordering::SeqCst), 0);
+
+            let result = panic::catch_unwind(|| {
+                waker1.wake_by_ref();
+            });
+            assert!(result.is_err());
+            assert_eq!(PANIC_WAKE_REF_COUNT.load(Ordering::SeqCst), 2);
+            assert_eq!(PANIC_DROP_COUNT.load(Ordering::SeqCst), 0);
+
+            let result = panic::catch_unwind(|| {
+                waker1.wake();
+            });
+            assert!(result.is_ok());
+            assert_eq!(PANIC_WAKE_VALUE_COUNT.load(Ordering::SeqCst), 1);
+            assert_eq!(PANIC_DROP_COUNT.load(Ordering::SeqCst), 1);
+        }
+        assert_eq!(PANIC_DROP_COUNT.load(Ordering::SeqCst), 2);
     }
 }
