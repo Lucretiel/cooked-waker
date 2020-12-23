@@ -150,12 +150,16 @@ use core::{
 };
 
 /// Trait for types that can be converted into raw pointers and back again.
-/// Implementors must ensure that, for a given object, the pointer remains
-/// fixed as long as no mutable operations are performed (that is, calling
-/// from_ptr() followed by into_ptr(), with no mutable operations in between,
-/// the returned pointer has the same value.) Implementors also must not panic
-/// when the interface is used correctly. The Waker constructed by IntoWaker
-/// can cause a double drop if either of these functions panic.
+///
+/// # Safety
+///
+/// - Implementors must ensure that, for a given object, the pointer remains
+///   fixed as long as no mutable operations are performed (that is, calling
+///   from_ptr() followed by into_ptr(), with no mutable operations in between,
+///   the returned pointer has the same value.)
+/// - Implementors also must not panic when the interface is used correctly.
+///   The Waker constructed by IntoWaker can cause a double drop if either of
+///   these functions panic.
 ///
 /// In the future, we hope to have a similar trait added to the standard
 /// library; see https://github.com/rust-lang/rust/issues/75846 for details.
@@ -165,9 +169,12 @@ pub unsafe trait ViaRawPointer {
     /// Convert this object into a raw pointer.
     fn into_raw(self) -> *mut Self::Target;
 
-    /// Convert a raw pointer back into this object. This method must ONLY be
-    /// called on a pointer that was received via `Self::into_raw`, and that
-    /// pointer must not be used afterwards.
+    /// Convert a raw pointer back into this object.
+    ///
+    /// # Safety
+    ///
+    /// This method must ONLY be called on a pointer that was received via
+    /// `Self::into_raw`, and that pointer must not be used afterwards.
     unsafe fn from_raw(ptr: *mut Self::Target) -> Self;
 }
 
