@@ -251,7 +251,8 @@ where
             // simply assert that the pointer has remained the same. This is
             // part of the ViaRawPointer safety contract, so we only check it
             // in debug builds.
-            debug_assert_eq!(waker.into_raw(), raw);
+            let waker_raw = waker.into_raw();
+            debug_assert_eq!(waker_raw, raw);
 
             let cloned_raw = cloned.into_raw();
             let cloned_raw = cloned_raw as *const ();
@@ -268,7 +269,9 @@ where
             let raw = raw as *mut T::Target;
             let waker: T = unsafe { ViaRawPointer::from_raw(raw) };
             waker.wake_by_ref();
-            debug_assert_eq!(waker.into_raw(), raw);
+
+            let waker_raw = waker.into_raw();
+            debug_assert_eq!(waker_raw, raw);
         },
         // Drop
         |raw| {
