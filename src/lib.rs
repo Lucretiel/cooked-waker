@@ -427,7 +427,13 @@ where
 
     fn into_raw(self) -> *mut Self::Target {
         match self {
-            Some(value) => value.into_raw(),
+            Some(value) => match value.into_raw() {
+                ptr if ptr.is_null() => {
+                    let _ = unsafe { T::from_raw(ptr) };
+                    ptr::null_mut()
+                }
+                ptr => ptr,
+            },
             None => ptr::null_mut(),
         }
     }
