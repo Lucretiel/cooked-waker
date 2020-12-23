@@ -470,3 +470,87 @@ impl Wake for Waker {
         Waker::wake(self)
     }
 }
+
+#[cfg(test)]
+mod test {
+    extern crate std;
+
+    use super::*;
+    use std::panic;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::Waker;
+
+    static PANIC_WAKE_REF_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static PANIC_WAKE_VALUE_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static PANIC_DROP_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    #[derive(Debug, Clone)]
+    struct PanicWaker;
+
+    impl WakeRef for PanicWaker {
+        fn wake_by_ref(&self) {
+            PANIC_WAKE_REF_COUNT.fetch_add(1, Ordering::SeqCst);
+            panic!();
+        }
+    }
+
+    impl Wake for PanicWaker {
+        fn wake(self) {
+            PANIC_WAKE_VALUE_COUNT.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl Drop for PanicWaker {
+        fn drop(&mut self) {
+            PANIC_DROP_COUNT.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl ViaRawPointer for PanicWaker {
+        type Target = ();
+
+        fn into_raw(self) -> *mut () {
+            std::mem::forget(self);
+            std::ptr::null_mut()
+        }
+
+        unsafe fn from_raw(_ptr: *mut ()) -> Self {
+            PanicWaker
+        }
+    }
+
+    // Test that the wake_by_ref() behaves correctly even if it panics.
+    #[test]
+    fn panic_wake() {
+        assert_eq!(PANIC_DROP_COUNT.load(Ordering::SeqCst), 0);
+
+        let waker = PanicWaker;
+        {
+            let waker1: Waker = waker.into_waker();
+
+            let waker2: Waker = waker1.clone();
+
+            let result = panic::catch_unwind(|| {
+                waker2.wake_by_ref();
+            });
+            assert!(result.is_err());
+            assert_eq!(PANIC_WAKE_REF_COUNT.load(Ordering::SeqCst), 1);
+            assert_eq!(PANIC_DROP_COUNT.load(Ordering::SeqCst), 0);
+
+            let result = panic::catch_unwind(|| {
+                waker1.wake_by_ref();
+            });
+            assert!(result.is_err());
+            assert_eq!(PANIC_WAKE_REF_COUNT.load(Ordering::SeqCst), 2);
+            assert_eq!(PANIC_DROP_COUNT.load(Ordering::SeqCst), 0);
+
+            let result = panic::catch_unwind(|| {
+                waker1.wake();
+            });
+            assert!(result.is_ok());
+            assert_eq!(PANIC_WAKE_VALUE_COUNT.load(Ordering::SeqCst), 1);
+            assert_eq!(PANIC_DROP_COUNT.load(Ordering::SeqCst), 1);
+        }
+        assert_eq!(PANIC_DROP_COUNT.load(Ordering::SeqCst), 2);
+    }
+}
